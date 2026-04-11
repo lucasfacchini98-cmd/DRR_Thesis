@@ -1,0 +1,176 @@
+
+# Lucas Facchini Cerqueira Mattos 0001133587
+
+import numpy as np
+import h5py
+import glob
+import re
+import rasterio
+from rasterio.transform import from_origin
+import geopandas as gpd
+from rasterio.mask import mask
+import matplotlib.pyplot as plt
+import os
+
+# Function to extract the grid position, h12v13 is an example of grid. Grid is the cell of a geographical structure.
+def get_position(filename):
+    match = re.search(r'h(\d+)v(\d+)', filename)
+    if match:
+        code = f'h{match.group(1)}v{match.group(2)}'
+        return grid_positions.get(code, (float('inf'), float('inf')))
+    return (float('inf'), float('inf'))
+
+# Predefined grid positions. Once we take files with a certain type of letters, select the interested grid
+grid_positions = {'h12v11': (0, 0), 'h12v12': (1, 0), 'h13v11': (0, 1), 'h13v12': (1, 1)}
+
+# Fixed coordinates in which the visualization and selection take place
+lat_min, lat_max = -40.0, -20.0
+lon_min, lon_max = -60.0, -40.0
+upper_limit = 10000
+
+# Path to the directory containing NASA files, they are downloaded in h5 extension, a format that follow the Hierarchical Data Format version 5(HDF5)
+# A type of file used to archive scientific data with complex dataset and big dimension
+nasa_files_path = r"C:\Users\luc\OneDrive\Desktop\MAGISTRALE\Python\Brasil_rainfall_nightlights\Final\NASA_files_h5"
+
+# Load HDF5 files and combine them into TIFF for each day
+# The code loads and combines nighttime lights data from HDF5 files for specific days (excluding day 116, that is missing). It uses h5py to access and combine datasets, 
+# then saves them as georeferenced TIFF files. This process involves reading HDF5 files, organizing data into a single combined array, clipping values 
+# (ensuring they do not exceed a specified upper limit), and creating TIFF files for geospatial visualization and analysis.
+
+# Days from April 9 to May 9
+for day in range(100, 130):  # Days from April 9 to May 9
+    if day == 116:
+        continue
+
+    # Load HDF5 files for the specific day
+    h5files = glob.glob(f'{nasa_files_path}/*.h5')
+    h5files = [file for file in h5files if f'.A2024{day:03}' in file]
+    h5files_sorted = sorted(h5files, key=get_position)
+
+    if not h5files_sorted:
+        print(f"No HDF5 files found for day {day}")
+        continue
+
+    # Combine the data
+    with h5py.File(h5files_sorted[0], 'r') as h5f:
+        dnb_ds = h5f['HDFEOS/GRIDS/VNP_Grid_DNB/Data Fields/Gap_Filled_DNB_BRDF-Corrected_NTL']
+        dnb_combined = np.zeros((2 * dnb_ds.shape[0], 2 * dnb_ds.shape[1]), dtype=dnb_ds.dtype)
+
+    for h5file in h5files_sorted:
+        with h5py.File(h5file, 'r') as h5f:
+            dnb_ds = h5f['HDFEOS/GRIDS/VNP_Grid_DNB/Data Fields/Gap_Filled_DNB_BRDF-Corrected_NTL']
+            pos = get_position(h5file)
+            dnb_combined[pos[0] * dnb_ds.shape[0]:(pos[0] + 1) * dnb_ds.shape[0],
+                          pos[1] * dnb_ds.shape[1]:(pos[1] + 1) * dnb_ds.shape[1]] = dnb_ds[:]
+
+    dnb_clipped = np.clip(dnb_combined, None, upper_limit)  # Clipping high values
+
+    # Configure the transformation and save as TIFF for each day
+    transform = from_origin(lon_min, lat_max, (lon_max - lon_min) / dnb_combined.shape[1], (lat_max - lat_min) / dnb_combined.shape[0])
+    output_raster_path = rf"C:\Users\luc\OneDrive\Desktop\MAGISTRALE\Python\Brasil_rainfall_nightlights\Final\Output_folder_tif\output_day_{day}.tif"
+    os.makedirs(os.path.dirname(output_raster_path), exist_ok=True)
+    if os.path.exists(output_raster_path):
+        os.remove(output_raster_path)
+    with rasterio.open(
+        output_raster_path, 'w', driver='GTiff',
+        height=dnb_clipped.shape[0], width=dnb_clipped.shape[1],
+        count=1, dtype=dnb_clipped.dtype,
+        crs='EPSG:4326', transform=transform
+    ) as dst:
+        dst.write(dnb_clipped, 1)
+
+    print(f"Processed day {day}")
+
+# Load and use two shapefiles with GeoPandas to represent the administrative boundaries of municipalities (rs_municipios) and the state (rs_estado) of Rio Grande do Sul, Brazil.
+# These datasets are crucial for masking and cropping raster images of nighttime lights, focusing on specific area of interest such as the entire state of Rio Grande do Sul.
+# Load the shapefile
+shapefile_path_municipios = r"C:\Users\luc\OneDrive\Desktop\MAGISTRALE\Python\Brasil_rainfall_nightlights\Final\RS_Municipios\RS_Municipios_2022.shp"
+shapefile_path_estado = r"C:\Users\luc\OneDrive\Desktop\MAGISTRALE\Python\Brasil_rainfall_nightlights\Final\RS_UF_2022\RS_UF_2022.shp"
+rs_municipios = gpd.read_file(shapefile_path_municipios)
+rs_estado = gpd.read_file(shapefile_path_estado)
+
+# Print the column names for verification
+print("RS Municipios columns:", rs_municipios.columns)
+print("RS Estado columns:", rs_estado.columns)
+
+# Define the areas of interest
+areas = ["Rio Grande do Sul", "Porto Alegre", "Caxias do Sul"]  # Example of some specific cities and the entire state
+
+# Function to mask and crop the rasters. This function `crop_and_mask` uses `rasterio` to mask a raster image (`tiff`) against specified geometric shapes (`shapes`) and returns the masked and cropped image. 
+# The parameter `crop=True` ensures that the image is cropped to fit exactly to the specified shapes.
+def crop_and_mask(tiff, shapes):
+    out_image, out_transform = mask(tiff, shapes, crop=True)
+    return out_image[0]
+
+# Loop for each area of interest
+# The code compares nighttime brightness variations between two specific days (day 100 and day 130) across different areas of Rio Grande do Sul, Brazil.
+# It uses shapefiles to define areas of interest such as specific cities or the entire state. TIFF files containing brightness data are loaded and values are clipped to ensure accuracy. 
+# The data is cropped and masked according to the selected area shapes using the crop_and_mask function. Differences in brightness between the two days are calculated and visualized using matplotlib, 
+# with results saved as PNG images for spatial analysis of nighttime brightness variations.
+for area in areas:
+    if area == "Rio Grande do Sul":
+        area_shape = rs_estado  # Use the state shapefile
+    else:
+        area_shape = rs_municipios[rs_municipios['NM_MUN'] == area]  # Filter by municipality name
+
+    if area_shape.empty:
+        print(f"No shapes found for area {area}")
+        continue
+
+    shapes = [area_shape.geometry.unary_union]
+
+    # Load the TIFF files for days 100 and 130
+    tiff_day_100_path = rf"C:\Users\luc\OneDrive\Desktop\MAGISTRALE\Python\Brasil_rainfall_nightlights\Final\Output_folder_tif\output_day_100.tif"
+    tiff_day_129_path = rf"C:\Users\luc\OneDrive\Desktop\MAGISTRALE\Python\Brasil_rainfall_nightlights\Final\Output_folder_tif\output_day_129.tif"
+
+    if not os.path.exists(tiff_day_100_path):
+        print(f"File not found: {tiff_day_100_path}")
+        continue
+    if not os.path.exists(tiff_day_129_path):
+        print(f"File not found: {tiff_day_129_path}")
+        continue
+
+    with rasterio.open(tiff_day_100_path) as src:
+        tiff_day_100 = src.read(1)
+        profile_100 = src.profile
+
+    with rasterio.open(tiff_day_129_path) as src:
+        tiff_day_129 = src.read(1)
+        profile_129 = src.profile
+
+    # Clip the maximum brightness value
+    tiff_day_100[tiff_day_100 > 100] = 100
+    tiff_day_129[tiff_day_129 > 100] = 100
+
+    # Ensure files are closed before re-opening
+    src.close()
+
+    # Crop and mask the rasters
+    with rasterio.open(tiff_day_100_path) as src:
+        crop_100 = crop_and_mask(src, shapes)
+        
+    with rasterio.open(tiff_day_129_path) as src:
+        crop_129 = crop_and_mask(src, shapes)
+
+    # Calculate the difference
+    delta = crop_100 - crop_129
+
+    # Plot the results
+    plt.figure(figsize=(10, 8))
+    plt.imshow(delta, cmap='plasma', extent=(lon_min, lon_max, lat_min, lat_max), vmin=0, vmax=100)
+    plt.colorbar(label='Brightness Variation')
+    plt.title(f"Brightness Delta: Day 100 vs Day 129 - {area}")
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+
+    # Create the output directory for the plots if it does not exist
+    output_dir = rf"C:\Users\luc\OneDrive\Desktop\MAGISTRALE\Python\Brasil_rainfall_nightlights\Final\Delta"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save the plot
+    # Increase dpi value to improve the image definition for a better understand of the brightness variation
+    output_file = os.path.join(output_dir, f"Delta_Brightness_{area.replace(' ', '_')}.png")
+    plt.savefig(output_file, dpi=1200)
+
+    # Show the plot 
+    plt.show()
